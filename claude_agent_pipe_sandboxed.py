@@ -269,6 +269,30 @@ class OpenTerminalClient:
         async for _ in self.stream_output(handle):
             pass
 
+    async def ensure_skills(
+        self, user_id: str, workdir: str, skills: List[str]
+    ) -> None:
+        """Symlink system-vendored skills from /opt/claude-skills/ into the
+        chat's CLAUDE_CONFIG_DIR so Claude picks them up at startup. Uses
+        `ln -sfn` so image rebuilds that change the skill set propagate to
+        existing chats on their next turn (the old symlink is replaced, not
+        skipped). No-op if the skills list is empty."""
+        if not skills:
+            return
+        for s in skills:
+            # Skill names are baked into the image path; reject anything
+            # that could break out of the /opt/claude-skills/ prefix.
+            if not re.match(r"^[a-zA-Z0-9_-]+$", s):
+                raise OpenTerminalError(f"unsafe skill name: {s!r}")
+        parts = [f"mkdir -p {workdir}/.claude/skills"]
+        parts += [
+            f"ln -sfn /opt/claude-skills/{s} {workdir}/.claude/skills/{s}"
+            for s in skills
+        ]
+        handle = await self.start(user_id, " && ".join(parts))
+        async for _ in self.stream_output(handle):
+            pass
+
     async def run_capture(self, user_id: str, command: str) -> str:
         """Run a short command and return its merged stdout/stderr as a single
         string. For one-shot utility commands (ls, cat of tiny files) where
@@ -715,6 +739,16 @@ class Pipe:
                 "{chat_id} is substituted. Artifacts persist across turns."
             ),
         )
+        SKILLS: str = Field(
+            default="docx,pdf,pptx,xlsx,frontend-design",
+            description=(
+                "Comma-separated list of skill names to symlink into each "
+                "chat's .claude/skills/ from /opt/claude-skills/ in the "
+                "sandbox image. Must match directories baked into the image "
+                "at build time (see sandbox/Dockerfile CLAUDE_SKILLS arg). "
+                "Empty string disables."
+            ),
+        )
 
     def __init__(self) -> None:
         self.valves = self.Valves()
@@ -809,6 +843,13 @@ class Pipe:
                 self.valves.OPEN_TERMINAL_API_KEY,
             ) as client:
                 await client.ensure_dir(sandbox_user, workdir)
+
+                skills = [
+                    s.strip()
+                    for s in (self.valves.SKILLS or "").split(",")
+                    if s.strip()
+                ]
+                await client.ensure_skills(sandbox_user, workdir, skills)
 
                 # Cache miss = either a brand-new chat OR an OWUI restart
                 # dropped the in-process map (#5). Claude's own on-disk
