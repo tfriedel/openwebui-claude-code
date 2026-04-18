@@ -360,7 +360,18 @@ def _claude_command(prompt: str, cfg: _ClaudeRunConfig) -> str:
     # the same OWUI user race each other on ~/.claude/. With the proxy
     # holding credentials, the config dir stores only session history —
     # safe to shard per chat and discard with the workdir.
-    env_parts.append(f"CLAUDE_CONFIG_DIR={shlex.quote(cfg.workdir + '/.claude')}")
+    #
+    # Leading `~/` must be pre-expanded to `$HOME/` because shlex.quote()
+    # adds single quotes, which suppress tilde expansion by the shell.
+    # Without this, Claude receives a literal `~` as the first path
+    # component and creates `./~/chat-<id>/.claude/` relative to cwd,
+    # silently breaking session isolation, session recovery, and skill
+    # discovery. Double-quoting allows $HOME expansion while still
+    # escaping any other shell specials in the path.
+    config_dir = cfg.workdir + "/.claude"
+    if config_dir.startswith("~/"):
+        config_dir = "$HOME/" + config_dir[2:]
+    env_parts.append(f'CLAUDE_CONFIG_DIR="{config_dir}"')
     # `claude --dangerously-skip-permissions` still refuses root unless told
     # it's sandboxed. open-terminal runs processes as the per-user UID so this
     # rarely matters, but setting it is harmless.
@@ -569,8 +580,13 @@ async def _snapshot_workspace(
     # Use find with -printf to get path + mtime in one call, avoiding N+1
     # HTTP hits against /files/list for every subdirectory.
     # workdir unquoted so `~` / `$HOME` expand; see OpenTerminalClient.ensure_dir.
+    # Prune `.claude/` (Claude Code's own config/session storage) and any
+    # stray `~` literal dir from pre-fix chats — neither is user-facing
+    # artifact content, and .claude.json would otherwise get inlined as a
+    # chat attachment.
     cmd = (
-        f"find {workdir} -type f "
+        f"find {workdir} "
+        rf"\( -name '.claude' -o -name '~' \) -prune -o -type f "
         rf"\( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' "
         rf"-o -iname '*.gif' -o -iname '*.svg' -o -iname '*.webp' "
         rf"-o -iname '*.pdf' -o -iname '*.csv' -o -iname '*.tsv' "
