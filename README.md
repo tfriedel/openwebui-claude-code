@@ -9,7 +9,6 @@ This is an Open WebUI **Pipe** that exposes Claude Code as a selectable model. E
 - **Full Claude Code agent loop** — Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch (configurable allowlist)
 - **Per-chat workspaces** — each `chat_id` gets a sandboxed working directory that persists across turns
 - **Dual auth** — bring your own Anthropic **API key** (pay-per-token) *or* a **Claude Pro/Max OAuth token** (bills against your subscription)
-- **Fast path for trivial messages** — when no tools are needed, bypasses the SDK and hits the Messages API directly (~300 ms instead of multi-second CLI cold start)
 - **Streaming UI** — tool calls render inline with previews; generated images/PDFs/CSVs surface as artifacts in the chat
 - **Configurable valves** — model, permission mode, tool allowlist, max turns, workspace root
 

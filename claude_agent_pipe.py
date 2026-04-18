@@ -1364,18 +1364,7 @@ class Pipe:
             yield "_No user message to send to Claude Code._"
             return
 
-        # Gate: fast path for simple Q&A, agent path for tasks needing
-        # tools/files. Same model, different invocation cost. The user can
-        # always force with `/agent` or `/fast` at the start of their message.
-        if not _needs_agent(prompt, __files__):
-            async for chunk in self._run_fast(
-                body, __user__, __metadata__, __files__, __event_emitter__
-            ):
-                yield chunk
-            return
-
-        # Agent path: strip the `/agent` prefix (if any) so Claude doesn't
-        # see it as content.
+        # Fast path disabled — always run the full agent loop.
         prompt = _strip_mode_prefix(prompt)
 
         chat_id = __chat_id__ or "default"
