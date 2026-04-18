@@ -61,7 +61,19 @@ _MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 # OpenWebUI calls pipe() fresh for each chat turn. Same pattern as the SDK
 # pipe — in-process map of chat_id → claude session_id so `claude --resume`
 # picks up prior turns' state.
+#
+# This cache is lost on OWUI restart, but the session JSONL Claude writes to
+# $CLAUDE_CONFIG_DIR/projects/<slug>/<session>.jsonl IS the authoritative
+# source. _recover_session_id rebuilds the mapping from disk on cache miss.
 _chat_sessions: Dict[str, str] = {}
+
+
+# Valid claude session UUIDs on disk. Filter against stray files so a
+# misnamed artifact can't be silently used as a session id. Claude writes
+# lowercase-hex UUIDs with standard hyphenation.
+_SESSION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 
 
 # ============================================================================
@@ -85,6 +97,35 @@ def _safe_chat_id(raw: str) -> str:
     necessary because shlex.quote wraps in single quotes and single quotes
     suppress the `~` and `$HOME` expansion our workdir templates rely on."""
     return _CHAT_ID_SAFE.sub("", raw) or "default"
+
+
+async def _recover_session_id(
+    client: "OpenTerminalClient", user_id: str, workdir: str
+) -> Optional[str]:
+    """Find the newest session JSONL on disk and extract its session_id.
+
+    Claude stores per-project session history at
+    $CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-uuid>.jsonl, and the
+    filename stem IS the session id (no JSON parsing required). Because we
+    set CLAUDE_CONFIG_DIR per-chat (`<workdir>/.claude`, see #9), every
+    JSONL under that tree belongs to this chat — we don't need to know
+    Claude's cwd slugification rules.
+
+    Returns None if no session has been written yet (first turn of a chat).
+    `ls -t` handles the rare multi-session case (prior resume failed and
+    Claude started a fresh session in the same workdir) by ordering newest
+    first, per the issue's acceptance criteria.
+    """
+    # `workdir` is already sanitized (alphanumerics + / . _ - ~) and must
+    # remain unquoted so bash expands `~`. The rest of the glob is static.
+    cmd = f"ls -t {workdir}/.claude/projects/*/*.jsonl 2>/dev/null | head -1"
+    out = (await client.run_capture(user_id, cmd)).strip()
+    if not out.endswith(".jsonl"):
+        return None
+    basename = out.rsplit("/", 1)[-1][: -len(".jsonl")]
+    if not _SESSION_ID_RE.match(basename):
+        return None
+    return basename
 
 
 @dataclass
@@ -227,6 +268,17 @@ class OpenTerminalClient:
         handle = await self.start(user_id, f"mkdir -p {path}")
         async for _ in self.stream_output(handle):
             pass
+
+    async def run_capture(self, user_id: str, command: str) -> str:
+        """Run a short command and return its merged stdout/stderr as a single
+        string. For one-shot utility commands (ls, cat of tiny files) where
+        we don't need streaming — keeps callers simple."""
+        handle = await self.start(user_id, command)
+        chunks: List[str] = []
+        async for stream, chunk in self.stream_output(handle):
+            if stream == "output":
+                chunks.append(chunk)
+        return "".join(chunks)
 
 
 # ============================================================================
@@ -708,6 +760,8 @@ class Pipe:
             permission_mode=self.valves.PERMISSION_MODE,
             allowed_tools=allowed_tools,
             max_turns=self.valves.MAX_TURNS,
+            # Populated below once the client is open — may be recovered
+            # from disk if the in-process cache was cleared by a restart.
             resume_session_id=_chat_sessions.get(chat_id),
             anthropic_base_url=self.valves.ANTHROPIC_BASE_URL,
             workdir=workdir,
@@ -755,6 +809,24 @@ class Pipe:
                 self.valves.OPEN_TERMINAL_API_KEY,
             ) as client:
                 await client.ensure_dir(sandbox_user, workdir)
+
+                # Cache miss = either a brand-new chat OR an OWUI restart
+                # dropped the in-process map (#5). Claude's own on-disk
+                # session JSONL tells us which — look there before giving
+                # up and starting a fresh session.
+                if cfg.resume_session_id is None:
+                    recovered = await _recover_session_id(
+                        client, sandbox_user, workdir
+                    )
+                    if recovered:
+                        cfg.resume_session_id = recovered
+                        _chat_sessions[chat_id] = recovered
+                        log.info(
+                            "recovered session %s for chat %s from disk",
+                            recovered,
+                            chat_id,
+                        )
+
                 before_snapshot = await _snapshot_workspace(
                     client, sandbox_user, workdir
                 )
