@@ -23,6 +23,39 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends bubblewrap socat git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Native deps for the document skills:
+#   libreoffice-{core,writer,calc,impress} — headless `soffice` for .doc↔.docx
+#     conversion, tracked-change acceptance, xlsx recalc, and pptx thumbs.
+#   poppler-utils — pdftoppm binary + pdf2image Python backend.
+#   fonts-dejavu — baseline sans/serif so rendered PDFs aren't blank boxes.
+# The LibreOffice subpackages total ~500 MB; installing the core meta
+# package would add Java + GUI deps we never use. Pandoc (docx→markdown
+# reading path) is already in the base image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libreoffice-core libreoffice-writer libreoffice-calc \
+        libreoffice-impress \
+        poppler-utils fonts-dejavu \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python libraries used by the skill scripts + standard data-science
+# tooling so ad-hoc analysis doesn't require a per-turn `pip install`
+# (which would exercise the egress allowlist every time and slow the
+# first response). Installed system-wide into the base image's Python
+# 3.12 under /usr/local (not PEP 668 managed, so no --break-system
+# flag needed).
+RUN pip3 install --no-cache-dir \
+        pypdf pdfplumber pdf2image reportlab Pillow \
+        openpyxl python-docx python-pptx \
+        pandas numpy matplotlib \
+        lxml defusedxml \
+        'markitdown[pptx]'
+
+# Node package for the docx skill's "Creating New Documents" path —
+# docx-js is preferred over python-docx when generating richly formatted
+# documents from scratch (tables of contents, footnotes, columns, etc.).
+RUN npm install -g docx
+
 # Vendor a curated set of Anthropic skills into /opt/claude-skills. Each
 # chat's CLAUDE_CONFIG_DIR/.claude/skills/ symlinks here at runtime, so all
 # users share a read-only copy without per-chat duplication. To update the
