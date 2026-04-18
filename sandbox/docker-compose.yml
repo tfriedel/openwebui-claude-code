@@ -1,0 +1,20 @@
+services:
+  open-terminal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: helm/open-terminal-claude:latest
+    container_name: open-terminal
+    ports:
+      - "8000:8000"
+    environment:
+      OPEN_TERMINAL_MULTI_USER: "true"
+      OPEN_TERMINAL_API_KEY: ${OPEN_TERMINAL_API_KEY:?set in .env}
+      OPEN_TERMINAL_USER_PREFIX: "owui_"
+      EXECUTE_TIMEOUT: "600"
+    volumes:
+      - open-terminal-home:/home
+    restart: unless-stopped
+
+volumes:
+  open-terminal-home:
