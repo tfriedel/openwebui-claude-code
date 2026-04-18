@@ -241,8 +241,10 @@ class _ClaudeRunConfig:
     allowed_tools: List[str]
     max_turns: int
     resume_session_id: Optional[str]
-    oauth_token: Optional[str]
-    api_key: Optional[str]
+    # URL of the credential-injecting proxy the sandbox should route Claude API
+    # traffic through. Real ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN live on
+    # the proxy container only; the sandbox never sees them.
+    anthropic_base_url: str
     workdir: str
     system_prompt_append: Optional[str]
 
@@ -264,10 +266,19 @@ _SANDBOX_ENV_NOTE = (
 
 def _claude_command(prompt: str, cfg: _ClaudeRunConfig) -> str:
     env_parts: List[str] = []
-    if cfg.oauth_token:
-        env_parts.append(f"CLAUDE_CODE_OAUTH_TOKEN={shlex.quote(cfg.oauth_token)}")
-    elif cfg.api_key:
-        env_parts.append(f"ANTHROPIC_API_KEY={shlex.quote(cfg.api_key)}")
+    # Route all Anthropic API calls through the credential-injecting proxy.
+    # Claude Code honours ANTHROPIC_BASE_URL; the proxy adds the real
+    # credential before forwarding to api.anthropic.com. No token in env or
+    # argv → `env`, `printenv`, `cat /proc/self/environ` reveal nothing
+    # Anthropic-shaped from inside the sandbox.
+    env_parts.append(f"ANTHROPIC_BASE_URL={shlex.quote(cfg.anthropic_base_url)}")
+    # The CLI refuses to talk to a non-anthropic.com base URL unless it also
+    # sees a non-empty auth variable. ANTHROPIC_AUTH_TOKEN is the docs'
+    # recommended variable for gateway/proxy setups — the CLI sends it as
+    # `Authorization: Bearer ...`, which the proxy then unconditionally
+    # overwrites with the real credential. The placeholder value is never
+    # seen by Anthropic.
+    env_parts.append("ANTHROPIC_AUTH_TOKEN=proxied")
     # `claude --dangerously-skip-permissions` still refuses root unless told
     # it's sandboxed. open-terminal runs processes as the per-user UID so this
     # rarely matters, but setting it is harmless.
@@ -613,16 +624,15 @@ class Pipe:
                 "the end user is then conveyed via the X-User-Id header."
             ),
         )
-        ANTHROPIC_API_KEY: str = Field(
-            default="",
-            description="Anthropic API key (pay-per-token). Forwarded into the sandbox as an env var.",
-        )
-        CLAUDE_CODE_OAUTH_TOKEN: str = Field(
-            default="",
+        ANTHROPIC_BASE_URL: str = Field(
+            default="http://anthropic-proxy:8081",
             description=(
-                "Claude subscription OAuth token. Takes priority over "
-                "ANTHROPIC_API_KEY — don't share with untrusted users (per "
-                "Anthropic's subscription terms)."
+                "Credential-injecting proxy the sandbox routes Anthropic "
+                "traffic through. The real ANTHROPIC_API_KEY / "
+                "CLAUDE_CODE_OAUTH_TOKEN live on the proxy container only — "
+                "the sandbox never sees them, so `env` inside the agent "
+                "reveals nothing Anthropic-shaped. Use the docker-compose "
+                "service DNS name when both run in the same network."
             ),
         )
         MODEL: str = Field(default="claude-haiku-4-5")
@@ -684,8 +694,7 @@ class Pipe:
             allowed_tools=allowed_tools,
             max_turns=self.valves.MAX_TURNS,
             resume_session_id=_chat_sessions.get(chat_id),
-            oauth_token=self.valves.CLAUDE_CODE_OAUTH_TOKEN or None,
-            api_key=self.valves.ANTHROPIC_API_KEY or None,
+            anthropic_base_url=self.valves.ANTHROPIC_BASE_URL,
             workdir=workdir,
             system_prompt_append=_extract_system_prompt(body),
         )
