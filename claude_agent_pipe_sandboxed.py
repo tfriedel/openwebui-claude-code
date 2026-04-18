@@ -279,6 +279,12 @@ def _claude_command(prompt: str, cfg: _ClaudeRunConfig) -> str:
     # overwrites with the real credential. The placeholder value is never
     # seen by Anthropic.
     env_parts.append("ANTHROPIC_AUTH_TOKEN=proxied")
+    # Per-chat CLAUDE_CONFIG_DIR isolates session JSONL, settings.json, and
+    # any file state the CLI writes. Without this, two concurrent chats for
+    # the same OWUI user race each other on ~/.claude/. With the proxy
+    # holding credentials, the config dir stores only session history —
+    # safe to shard per chat and discard with the workdir.
+    env_parts.append(f"CLAUDE_CONFIG_DIR={shlex.quote(cfg.workdir + '/.claude')}")
     # `claude --dangerously-skip-permissions` still refuses root unless told
     # it's sandboxed. open-terminal runs processes as the per-user UID so this
     # rarely matters, but setting it is harmless.
@@ -337,6 +343,7 @@ async def _stream_claude_events(
     # that fail become synthetic _raw events so the caller can log them
     # without disrupting the agent loop.
     buf = ""
+    exited_cleanly = False
     try:
         async for stream, chunk in client.stream_output(handle, session_id=session_id):
             if stream == "exit":
@@ -347,6 +354,7 @@ async def _stream_claude_events(
                     except json.JSONDecodeError:
                         yield {"type": "_raw", "text": buf.strip()}
                     buf = ""
+                exited_cleanly = True
                 yield {"type": "_exit", "code": int(chunk)}
                 return
             buf += chunk
@@ -359,9 +367,16 @@ async def _stream_claude_events(
                     yield json.loads(line)
                 except json.JSONDecodeError:
                     yield {"type": "_raw", "text": line}
-    except asyncio.CancelledError:
-        await client.kill(handle, force=True)
-        raise
+    finally:
+        # Reap orphan claude processes on *any* abnormal exit path —
+        # cancellation, httpx timeout, pipe generator GC'd mid-stream,
+        # unhandled exception. Prior to this, only CancelledError
+        # triggered the kill, so a dropped browser with OWUI still
+        # running left claude billing tokens for up to EXECUTE_TIMEOUT.
+        # `kill` is best-effort (swallows HTTP errors) so double-kills
+        # on already-exited processes are harmless.
+        if not exited_cleanly:
+            await client.kill(handle, force=True)
 
 
 # ============================================================================

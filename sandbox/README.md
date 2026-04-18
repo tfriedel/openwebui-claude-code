@@ -73,3 +73,33 @@ The renderer's `_tool_preview` / `_tool_input_block` helpers already work on the
 - **Image context:** when the user attaches images in the chat, `client.write_file()` them into the workdir before invoking claude, then reference by path in the prompt.
 - **Session resume:** store `claude_session_id` per `chat_id` in-process (same as the current pipe). Needs testing that `claude --resume` works cleanly across separate `POST /execute` calls — each call is a fresh process, but claude persists session state to `~/.claude/` inside the user's home.
 - **Cold start:** first request per user spawns `useradd`; measure and decide whether to pre-warm on Open WebUI login.
+
+## Operations
+
+### Pinning the Claude Code CLI version
+
+The Dockerfile pins via an ARG. Two clean builds produce identical `claude --version`:
+
+```sh
+docker compose build --build-arg CLAUDE_CODE_VERSION=2.1.120 open-terminal
+```
+
+Bump the default in the Dockerfile when you want the repo to track a new version.
+
+### Disk cleanup
+
+Nothing is auto-deleted. `/opt/cleanup.sh` is installed in the image for explicit runs:
+
+```sh
+# Dry-run (safe): see what would be deleted, nothing touched.
+docker compose exec \
+  -e CHAT_TTL_DAYS=30 -e SESSION_TTL_DAYS=90 -e CLEANUP_DRY_RUN=true \
+  open-terminal /opt/cleanup.sh
+
+# Execute:
+docker compose exec \
+  -e CHAT_TTL_DAYS=30 -e SESSION_TTL_DAYS=90 -e CLEANUP_DRY_RUN=false \
+  open-terminal /opt/cleanup.sh
+```
+
+Schedule nightly via host cron if desired. Defaults to dry-run to prevent surprise deletions.
